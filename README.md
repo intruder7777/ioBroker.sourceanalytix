@@ -246,6 +246,9 @@ When the adapter crashes or any other Code error happens, this error message tha
 -->
 ## Changelog
 
+### __WORK IN PROGRESS__
+* (DutchmanNL) Bugfix : previousXXX not set #461
+
 ### 0.4.12-1 (2021-08-26)
 * (DutchmanNL) Add logging to analyse error caught by sentry
 

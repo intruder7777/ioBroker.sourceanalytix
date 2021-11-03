@@ -8,17 +8,20 @@
 // The adapter-core module gives you access to the core ioBroker functions
 // you need to create an adapter
 const utils = require('@iobroker/adapter-core');
-const adapterHelpers = require('iobroker-adapter-helpers'); // Lib used for Unit calculations
+const {
+	definitionLoader,		// Load library containing all units and exponents to calculate proper values
+	refreshDates, 			// Get current date timestamps
+	roundCosts,				// Round financial values
+	roundDigits,			// Round regular  values
+	basicStates,			// Array of basic states to create
+	weekdays,				// Array of Mo-Su
+	months					// Array of all months in a year
+} = require('./lib/helperFunctions');
 const schedule = require('cron').CronJob; // Cron Scheduler
 
 // Sentry error reporting, disable when testing alpha source code locally!
 const disableSentry = false;
 
-// Store all days and months
-const basicStates = ['01_currentDay', '02_currentWeek', '03_currentMonth', '04_currentQuarter', '05_currentYear'];
-const basicPreviousStates = ['01_previousDay', '02_previousWeek', '03_previousMonth', '04_previousQuarter', '05_previousYear'];
-const weekdays = JSON.parse('["07_Sunday","01_Monday","02_Tuesday","03_Wednesday","04_Thursday","05_Friday","06_Saturday"]');
-const months = JSON.parse('["01_January","02_February","03_March","04_April","05_May","06_June","07_July","08_August","09_September","10_October","11_November","12_December"]');
 const stateDeletion = true, previousCalculationRounded = {};
 const storeSettings = {};
 let calcBlock = null; // Global variable to block all calculations
@@ -27,6 +30,10 @@ let useCurrency = null;
 
 // Create variables for object arrays
 const history = {}, actualDate = {}; //, currentDay = null;
+const currentTimeSpace = {
+	actualDate : {},
+	previousDate : {},
+};
 
 class Sourceanalytix extends utils.Adapter {
 	/**
@@ -63,6 +70,7 @@ class Sourceanalytix extends utils.Adapter {
 
 			this.log.info('Welcome to SourceAnalytix, making things ready ... ');
 
+			//ToDo: verify if still needed
 			// Block all calculation functions during startup
 			calcBlock = true;
 
@@ -74,11 +82,24 @@ class Sourceanalytix extends utils.Adapter {
 				useCurrency = '€';
 			}
 
+			//ToDo: No ready !
 			// Load Unit definitions from helper library & prices from admin to workable memory array
-			await this.definitionLoader();
+			try {
+				const definitions = await definitionLoader(this.config.pricesDefinition);
+				this.unitPriceDef.unitConfig = definitions.unitStore;
+				this.unitPriceDef.unitConfig = definitions.priceStore;
+				this.log.debug(`Unit calculation factors and Price definitions successfully loaded : ${JSON.stringify(this.unitPriceDef)}`);
+			} catch (e) {
+				this.log.error(`Cannot load Unit & Price definitions, SourceAnalytix stopped ! : ${e}`);
+				//ToDo: add return and stop SA
+
+				// Kill SA instance
+				this.setForeignState('system.' + this.namespace + '.alive', false);
+			}
 
 			// Store current data/time information to memory
-			await this.refreshDates();
+			//ToDo:  Monitor & review  date reset
+			await this.dateToMemoryHelper();
 
 			// Load setting for Year statistics from admin settings
 			storeSettings.storeWeeks = this.config.store_weeks;
@@ -144,6 +165,7 @@ class Sourceanalytix extends utils.Adapter {
 			// Subscribe on all foreign objects to detect (de)activation of sourceanalytix enabled states
 			this.subscribeForeignObjects('*');
 
+			//ToDo: verify if still needed
 			// Enable all calculations with timeout of 500 ms
 			if (delay) {
 				clearTimeout(delay);
@@ -171,59 +193,6 @@ class Sourceanalytix extends utils.Adapter {
 	//     const allStates = await this.getAdapterObjectsAsync()
 	//     this.log.info((JSON.stringify(allStates)))
 	// }
-
-	/**
-     * Load calculation factors from helper library and store to memory
-     */
-	async definitionLoader() {
-		try {
-			// Load energy array and store exponents related to unit
-			let catArray = ['Watt', 'Watt_hour'];
-			const unitStore = this.unitPriceDef.unitConfig;
-			for (const item in catArray) {
-				const unitItem = adapterHelpers.units.electricity[catArray[item]];
-				for (const unitCat in unitItem) {
-					unitStore[unitItem[unitCat].unit] = {
-						exponent: unitItem[unitCat].exponent,
-						category: catArray[item],
-					};
-				}
-			}
-
-			// Load  volumes array and store exponents related to unit
-			catArray = ['Liter', 'Cubic_meter'];
-			for (const item in catArray) {
-				const unitItem = adapterHelpers.units.volume[catArray[item]];
-				for (const unitCat in unitItem) {
-					unitStore[unitItem[unitCat].unit] = {
-						exponent: unitItem[unitCat].exponent,
-						category: catArray[item],
-					};
-				}
-			}
-
-			// Load price definition from admin configuration
-			const pricesConfig = this.config.pricesDefinition;
-			const priceStore = this.unitPriceDef.pricesConfig;
-
-			for (const priceDef in pricesConfig) {
-				priceStore[pricesConfig[priceDef].cat] = {
-					cat: pricesConfig[priceDef].cat,
-					uDes: pricesConfig[priceDef].cat,
-					uPpU: pricesConfig[priceDef].uPpU,
-					uPpM: pricesConfig[priceDef].uPpM,
-					costType: pricesConfig[priceDef].costType,
-					unitType: pricesConfig[priceDef].unitType,
-				};
-			}
-
-			console.debug(`All Unit category's ${JSON.stringify(this.unitPriceDef)}`);
-
-		} catch (error) {
-			this.errorHandling('[definitionLoader]', error);
-		}
-
-	}
 
 	/**
 	 * Load state definitions to memory this.activeStates[stateID]
@@ -460,7 +429,7 @@ class Sourceanalytix extends utils.Adapter {
 			}
 
 			// Create basic current states
-			for (const state of basicStates) {
+			for (const state of basicStates.current) {
 				await this.doLocalStateCreate(stateID, state, state, false, false, true);
 				// .${actualDate.year}.
 
@@ -476,7 +445,7 @@ class Sourceanalytix extends utils.Adapter {
 
 				}
 
-				// Remove this line in final version, temporary to remove old datapoints
+				// Remove this line in final version, temporary to remove old data points
 				if (state === '05_currentYear'){
 
 					await this.doLocalStateCreate(`${stateID}`, state, state, false, true, false);
@@ -489,7 +458,7 @@ class Sourceanalytix extends utils.Adapter {
 
 			// Create basic current states for previous periods
 			if (this.config.currentYearPrevious) {
-				for (const state of basicPreviousStates) {
+				for (const state of basicStates.previous) {
 					await this.doLocalStateCreate(stateID, state, state, false, false, true);
 				}
 			}
@@ -595,7 +564,7 @@ class Sourceanalytix extends utils.Adapter {
 
 				//ToDo: Implement x ignore time (configurable) to avoid overload of unneeded calculations
 				// Avoid unneeded calculation if value is equal to known value in memory
-				// 10-01-2021 : disable IF check for new value to anlyse if this solve's 0 watt calc bug
+				// 10-01-2021 : disable IF check for new value to analyse if this solve's 0 watt calc bug
 				// 11-01-2021 : removing if successfully result, but need to check debounce !
 
 				// Handle calculation for state
@@ -623,9 +592,14 @@ class Sourceanalytix extends utils.Adapter {
 		try {
 			const resetDay = new schedule('0 0 * * *', async () => {
 				// const resetDay = new schedule('* * * * *', async () => { //  testing schedule
+				//ToDo: verify if still needed
 				calcBlock = true; // Pause all calculations
-				const beforeReset = await this.refreshDates(); // Reset date values in memory
-				this.log.debug(`[resetStartValues] Dates current : ${JSON.stringify(actualDate)} | beforeReset ${JSON.stringify(this.activeStates[beforeReset])}`);
+
+				//ToDo:  Monitor & review  date reset
+				await this.dateToMemoryHelper();
+				this.log.debug(`[resetStartValues] Dates in memory	 : ${JSON.stringify(currentTimeSpace)}`);
+				// const beforeReset = await this.refreshDates(); // Reset date values in memory
+
 				// Read state array and write Data for every active state
 				for (const stateID in this.activeStates) {
 					this.log.info(`Reset start values for : ${stateID}`);
@@ -652,10 +626,10 @@ class Sourceanalytix extends utils.Adapter {
 						obj.common.custom = {};
 						obj.common.custom[this.namespace] = {
 							start_day: reading,
-							start_month: beforeReset.month === actualDate.month ? stateValues.start_month : reading,
-							start_quarter: beforeReset.quarter === actualDate.quarter ? stateValues.start_quarter : reading,
-							start_week: beforeReset.week === actualDate.week ? stateValues.start_week : reading,
-							start_year: beforeReset.year === actualDate.year ? stateValues.start_year : reading,
+							start_month: currentTimeSpace.previousDate.month === actualDate.month ? stateValues.start_month : reading,
+							start_quarter: currentTimeSpace.previousDate.quarter === actualDate.quarter ? stateValues.start_quarter : reading,
+							start_week: currentTimeSpace.previousDate.week === actualDate.week ? stateValues.start_week : reading,
+							start_year: currentTimeSpace.previousDate.year === actualDate.year ? stateValues.start_year : reading,
 							valueAtDeviceInit: this.activeStates[stateID].calcValues.valueAtDeviceInit,
 							valueAtDeviceReset: this.activeStates[stateID].calcValues.valueAtDeviceReset,
 						};
@@ -670,7 +644,7 @@ class Sourceanalytix extends utils.Adapter {
 						this.activeStates[stateID].calcValues.cumulativeValue = reading;
 
 						//At week reset ensure current week values are moved to previous week and current set to 0
-						if (beforeReset.week !== actualDate.week) {
+						if (currentTimeSpace.previousDate.week !== actualDate.week) {
 							for (const x in weekdays) {
 
 								if (this.config.currentYearDays) {
@@ -743,47 +717,47 @@ class Sourceanalytix extends utils.Adapter {
 								switch (stateDetails.headCategory) {
 
 									case 'consumed':
-										if (beforeReset.day !== actualDate.day) {
+										if (currentTimeSpace.previousDate.day !== actualDate.day) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.01_currentDay`,
 												`${stateDetails.deviceName}.currentYear.consumed.01_previousDay`);
 										}
 
-										if (beforeReset.week !== actualDate.week) {
+										if (currentTimeSpace.previousDate.week !== actualDate.week) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.02_currentWeek`, `${stateDetails.deviceName}.currentYear.consumed.02_previousWeek`);
 										}
 
-										if (beforeReset.month !== actualDate.month) {
+										if (currentTimeSpace.previousDate.month !== actualDate.month) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.03_currentMonth`, `${stateDetails.deviceName}.currentYear.consumed.03_previousMonth`);
 										}
 
-										if (beforeReset.quarter !== actualDate.quarter) {
+										if (currentTimeSpace.previousDate.quarter !== actualDate.quarter) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.04_currentQuarter`, `${stateDetails.deviceName}.currentYear.consumed.04_previousQuarter`);
 										}
 
-										if (beforeReset.year !== actualDate.year) {
+										if (currentTimeSpace.previousDate.year !== actualDate.year) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.05_currentYear`, `${stateDetails.deviceName}.currentYear.consumed.05_previousYear`);
 										}
 
 										break;
 
 									case 'delivered':
-										if (beforeReset.day !== actualDate.day) {
+										if (currentTimeSpace.previousDate.day !== actualDate.day) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.01_currentDay`, `${stateDetails.deviceName}.currentYear.delivered.01_previousDay`);
 										}
 
-										if (beforeReset.week !== actualDate.week) {
+										if (currentTimeSpace.previousDate.week !== actualDate.week) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.02_currentWeek`, `${stateDetails.deviceName}.currentYear.delivered.02_previousWeek`);
 										}
 
-										if (beforeReset.month !== actualDate.month) {
+										if (currentTimeSpace.previousDate.month !== actualDate.month) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.03_currentMonth`, `${stateDetails.deviceName}.currentYear.delivered.03_previousMonth`);
 										}
 
-										if (beforeReset.quarter !== actualDate.quarter) {
+										if (currentTimeSpace.previousDate.quarter !== actualDate.quarter) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.04_currentQuarter`, `${stateDetails.deviceName}.currentYear.delivered.04_previousQuarter`);
 										}
 
-										if (beforeReset.year !== actualDate.year) {
+										if (currentTimeSpace.previousDate.year !== actualDate.year) {
 											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.05_currentYear`, `${stateDetails.deviceName}.currentYear.delivered.05_previousYear`);
 										}
 										break;
@@ -798,45 +772,45 @@ class Sourceanalytix extends utils.Adapter {
 							switch (stateDetails.financialCategory) {
 
 								case 'costs':
-									if (beforeReset.day !== actualDate.day) {
+									if (currentTimeSpace.previousDate.day !== actualDate.day) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.01_currentDay`, `${stateDetails.deviceName}.currentYear.costs.01_previousDay`);
 									}
 
-									if (beforeReset.week !== actualDate.week) {
+									if (currentTimeSpace.previousDate.week !== actualDate.week) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.02_currentWeek`, `${stateDetails.deviceName}.currentYear.costs.02_previousWeek`);
 									}
 
-									if (beforeReset.month !== actualDate.month) {
+									if (currentTimeSpace.previousDate.month !== actualDate.month) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.03_currentMonth`, `${stateDetails.deviceName}.currentYear.costs.03_previousMonth`);
 									}
 
-									if (beforeReset.quarter !== actualDate.quarter) {
+									if (currentTimeSpace.previousDate.quarter !== actualDate.quarter) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.04_currentQuarter`, `${stateDetails.deviceName}.currentYear.costs.04_previousQuarter`);
 									}
 
-									if (beforeReset.year !== actualDate.year) {
+									if (currentTimeSpace.previousDate.year !== actualDate.year) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.05_currentYear`, `${stateDetails.deviceName}.currentYear.costs.05_previousYear`);
 									}
 									break;
 
 								case 'earnings':
-									if (beforeReset.day !== actualDate.day) {
+									if (currentTimeSpace.previousDate.day !== actualDate.day) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.01_currentDay`, `${stateDetails.deviceName}.currentYear.earnings.01_previousDay`);
 									}
 
-									if (beforeReset.week !== actualDate.week) {
+									if (currentTimeSpace.previousDate.week !== actualDate.week) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.02_currentWeek`, `${stateDetails.deviceName}.currentYear.earnings.02_previousWeek`);
 									}
 
-									if (beforeReset.month !== actualDate.month) {
+									if (currentTimeSpace.previousDate.month !== actualDate.month) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.03_currentMonth`, `${stateDetails.deviceName}.currentYear.earnings.03_previousMonth`);
 									}
 
-									if (beforeReset.quarter !== actualDate.quarter) {
+									if (currentTimeSpace.previousDate.quarter !== actualDate.quarter) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.04_currentQuarter`, `${stateDetails.deviceName}.currentYear.earnings.04_previousQuarter`);
 									}
 
-									if (beforeReset.year !== actualDate.year) {
+									if (currentTimeSpace.previousDate.year !== actualDate.year) {
 										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.05_currentYear`, `${stateDetails.deviceName}.currentYear.earnings.05_previousYear`);
 									}
 									break;
@@ -861,7 +835,7 @@ class Sourceanalytix extends utils.Adapter {
 						this.log.info(`Current value of state : ${JSON.stringify(value)}`);
 						if (value) {
 							await this.setForeignStateAsync(stateID, {val: value.val, ack: true});
-							this.calculationHandler(stateID, value);
+							await this.calculationHandler(stateID, value);
 						}
 
 					} catch (error) {
@@ -871,6 +845,7 @@ class Sourceanalytix extends utils.Adapter {
 
 				}
 
+				//ToDo: verify if still needed
 				// Enable all calculations with timeout of 500 ms
 				if (delay) {
 					clearTimeout(delay);
@@ -886,6 +861,7 @@ class Sourceanalytix extends utils.Adapter {
 
 		} catch (error) {
 			this.errorHandling(`[resetStartValues]`, error);
+			//ToDo: verify if still needed
 			calcBlock = false; // Continue all calculations
 		}
 
@@ -993,8 +969,9 @@ class Sourceanalytix extends utils.Adapter {
 				// Create MeterReading states
 				if (!deleteState && stateDetails.meter_values) {
 
+					//ToDo: Check why this function is present
 					// Do not create StateRoot values
-					if (!basicStates.includes(stateRoot)) {
+					if (!basicStates.current.includes(stateRoot)) {
 						await this.localSetObject(`${stateDetails.deviceName}.${dateRoot}.meterReadings.${stateRoot}`, commonData);
 					}
 
@@ -1193,7 +1170,7 @@ class Sourceanalytix extends utils.Adapter {
 
 				// Determine previous reset value
 				// If null (first init) set 0 to valueAtDeviceReset otherwise copy current value
-				if (calcValues.valueAtDeviceReset == null || calcValues.valueAtDeviceReset == undefined){
+				if (calcValues.valueAtDeviceReset == null){
 					// Update memory value with valueAtDeviceReset 0 and current reading at init
 					obj.common.custom[this.namespace].valueAtDeviceReset = 0;
 					obj.common.custom[this.namespace].valueAtDeviceInit = reading;
@@ -1217,7 +1194,7 @@ class Sourceanalytix extends utils.Adapter {
 			};
 
 			// Verify if state is initiated for the first time, if not handle initialisation
-			if ((calcValues.valueAtDeviceReset == null || calcValues.valueAtDeviceReset == undefined) && currentCath !== 'Watt'){
+			if ((calcValues.valueAtDeviceReset == null) && currentCath !== 'Watt'){
 				this.log.info(`Initiating ${stateID} for the first time in SourceAnalytix`);
 				await initiateState();
 
@@ -1280,7 +1257,7 @@ class Sourceanalytix extends utils.Adapter {
 			if (stateDetails.meter_values === true) {
 				// Always write generic meterReadings for current year
 				stateName = `${this.namespace}.${stateDetails.deviceName}.currentYear.meterReadings`;
-				const readingRounded = await this.roundDigits(reading);
+				const readingRounded = roundDigits(reading);
 
 				// Store meter reading to related period
 				if (readingRounded) {
@@ -1324,16 +1301,16 @@ class Sourceanalytix extends utils.Adapter {
 
 			// Handle rounding of values
 			const calculationRounded = {
-				consumedDay: await this.roundDigits(calculations.consumedDay),
-				consumedWeek: await this.roundDigits(calculations.consumedWeek),
-				consumedMonth: await this.roundDigits(calculations.consumedMonth),
-				consumedQuarter: await this.roundDigits(calculations.consumedQuarter),
-				consumedYear: await this.roundDigits(calculations.consumedYear),
-				priceDay: await this.roundCosts(statePrices.unitPrice * calculations.consumedDay),
-				priceWeek: await this.roundCosts(statePrices.unitPrice * calculations.consumedWeek),
-				priceMonth: await this.roundCosts(statePrices.unitPrice * calculations.consumedMonth),
-				priceQuarter: await this.roundCosts(statePrices.unitPrice * calculations.consumedQuarter),
-				priceYear: await this.roundCosts(statePrices.unitPrice * calculations.consumedYear),
+				consumedDay: roundDigits(calculations.consumedDay),
+				consumedWeek: roundDigits(calculations.consumedWeek),
+				consumedMonth: roundDigits(calculations.consumedMonth),
+				consumedQuarter: roundDigits(calculations.consumedQuarter),
+				consumedYear: roundDigits(calculations.consumedYear),
+				priceDay: roundCosts(statePrices.unitPrice * calculations.consumedDay),
+				priceWeek: roundCosts(statePrices.unitPrice * calculations.consumedWeek),
+				priceMonth: roundCosts(statePrices.unitPrice * calculations.consumedMonth),
+				priceQuarter: roundCosts(statePrices.unitPrice * calculations.consumedQuarter),
+				priceYear: roundCosts(statePrices.unitPrice * calculations.consumedYear),
 			};
 
 			this.visWidgetJson[stateID].date = calculationRounded;
@@ -1483,39 +1460,6 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {number} [value] - Number to round with , separator
-     */
-	async roundDigits(value) {
-		let rounded;
-		try {
-			rounded = Number(value);
-			rounded = Math.round(rounded * 1000) / 1000;
-			this.log.debug(`roundDigits with ${value} rounded ${rounded}`);
-			if (!rounded) return value;
-			return rounded;
-		} catch (error) {
-			this.errorHandling(`[roundDigits] ${value}`, error);
-			rounded = value;
-			return rounded;
-		}
-	}
-
-	/**
-     * @param {number} [value] - Number to round with . separator
-     */
-	async roundCosts(value) {
-		try {
-			let rounded = Number(value);
-			rounded = Math.round(rounded * 100) / 100;
-			this.log.debug(`roundCosts with ${value} rounded ${rounded}`);
-			if (!rounded) return value;
-			return rounded;
-		} catch (error) {
-			this.errorHandling(`[roundCosts] ${value}`, error);
-		}
-	}
-
-	/**
      * @param {string} [stateID]- ID of state
      * @param {object} [value] - Current value in wH
      */
@@ -1609,49 +1553,10 @@ class Sourceanalytix extends utils.Adapter {
 	/**
      * Load current dates (year, week, month, quarter, day)
      */
-	async refreshDates() {
-	    // Get current date
-		const today = new Date(); // Get current date in Unix time format
-		// Store current used dates to memory
-		const previousDates = {
-			day: actualDate.day,
-			week: actualDate.week,
-			month: actualDate.month,
-			quarter: actualDate.quarter,
-			year: actualDate.year
-		};
-
-		// Write current dates to memory
-		actualDate.day = weekdays[today.getDay()];
-		actualDate.week = await this.getWeekNumber(today);
-		actualDate.month = months[today.getMonth()];
-		actualDate.quarter = Math.floor((today.getMonth() + 3) / 3);
-		actualDate.year = (new Date().getFullYear());
-
-		return previousDates;
-	}
-
-	/**
-     * define proper week-number, add 0 in case of < 10
-     * @param {object} d - Current date (like initiated with new Date())
-     */
-	getWeekNumber(d) {
-		// Copy date so don't modify original
-		d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-		// Set to nearest Thursday: current date + 4 - current day number
-		// Make Sunday's day number 7
-		d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
-		// Get first day of year
-		const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-		// Calculate full weeks to nearest Thursday
-		// @ts-ignore subtracting dates is fine
-		let weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7).toString();
-
-		if (weekNo.length === 1) {
-			weekNo = '0' + weekNo;
-		}
-		// Return week number
-		return weekNo;
+	dateToMemoryHelper() {
+		const dateRefresh = refreshDates(actualDate);
+		currentTimeSpace.actualDate = dateRefresh.currentDateArray;
+		currentTimeSpace.previousDate = dateRefresh.previousDateArray;
 	}
 
 	/**

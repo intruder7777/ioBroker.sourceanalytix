@@ -4,5 +4,7 @@ updates:
   directory: "/"
   schedule:
     interval: "daily"
+  allow:
+    - dependency-type: 'direct'
   target-branch: "dependencyAutoUpdate"
   open-pull-requests-limit: 30
